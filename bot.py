@@ -1,7 +1,7 @@
 import os
 import anthropic
 from telegram import Update
-from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 claude_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
@@ -28,8 +28,8 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history[update.message.chat_id] = []
     await update.message.reply_text("초기화됐어요 😊")
 
-bot = Application.builder().token(TELEGRAM_TOKEN).build()
-bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
-bot.add_handler(CommandHandler("reset", reset))
+app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
+app.add_handler(CommandHandler("reset", reset))
 print("Starting bot...")
-bot.run_polling()
+app.run_polling()
