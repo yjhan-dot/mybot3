@@ -84,7 +84,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=uid, action="typing")
     
     res = claude_client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-opus-4-5",
         max_tokens=1024,
         system=system_msg,
         messages=history[uid]
