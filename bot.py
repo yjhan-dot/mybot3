@@ -78,7 +78,7 @@ def get_gmail_messages(creds, query="is:unread"):
             msg = gmail.users().messages().get(userId="me", id=m["id"], format="metadata").execute()
             headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
             snippet = msg.get("snippet", "")[:100]
-            result += f"- 제목: {headers.get('Subject', '없음')}\n  발신: {headers.get('From', '없음')}\n  내용미리보기: {snippet}\n\n"
+            result += f"- 제목: {headers.get('Subject', '없음')}\n  발신: {headers.get('From', '없음')}\n  미리보기: {snippet}\n\n"
         return result
     except Exception as ex:
         return f"Gmail 오류: {str(ex)}"
@@ -91,7 +91,7 @@ def create_draft(creds, to, subject, body):
         message["subject"] = subject
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         gmail.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
-        return f"✅ 드래프트 저장 완료!"
+        return "✅ 드래프트 저장 완료!"
     except Exception as ex:
         return f"드래프트 오류: {str(ex)}"
 
@@ -114,7 +114,7 @@ def get_page_title(page):
         if isinstance(prop, dict):
             title_list = prop.get("title", [])
             if title_list:
-                return title_list[0].get("plain_text", "제목없음")
+                return title_list[0].get("plain_text", "")
     return "제목없음"
 
 def get_notion_page_content(page_id):
@@ -128,144 +128,99 @@ def get_notion_page_content(page_id):
             text = "".join([t.get("plain_text", "") for t in rich_text])
             if text:
                 content += f"{text}\n"
-            # 하위 블록도 읽기
-            if block.get("has_children"):
-                try:
-                    sub_blocks = notion.blocks.children.list(block_id=block["id"]).get("results", [])
-                    for sub in sub_blocks:
-                        sub_type = sub.get("type", "")
-                        sub_data = sub.get(sub_type, {})
-                        sub_text_list = sub_data.get("rich_text", [])
-                        sub_text = "".join([t.get("plain_text", "") for t in sub_text_list])
-                        if sub_text:
-                            content += f"  {sub_text}\n"
-                except:
-                    pass
-        return content[:3000] if content else "내용이 없습니다."
-    except Exception as ex:
-        return f"내용 오류: {str(ex)}"
+        return content[:2000] if content else ""
+    except:
+        return ""
+
+def read_page_properties(page):
+    props = page.get("properties", {})
+    result = ""
+    for key, val in props.items():
+        vtype = val.get("type", "")
+        text = ""
+        if vtype == "title":
+            text = "".join([t.get("plain_text", "") for t in val.get("title", [])])
+        elif vtype == "rich_text":
+            text = "".join([t.get("plain_text", "") for t in val.get("rich_text", [])])
+        elif vtype == "email":
+            text = val.get("email", "") or ""
+        elif vtype == "phone_number":
+            text = val.get("phone_number", "") or ""
+        elif vtype == "number":
+            num = val.get("number")
+            text = str(num) if num is not None else ""
+        elif vtype == "select":
+            sel = val.get("select")
+            text = sel.get("name", "") if sel else ""
+        elif vtype == "multi_select":
+            text = ", ".join([s.get("name", "") for s in val.get("multi_select", [])])
+        elif vtype == "url":
+            text = val.get("url", "") or ""
+        elif vtype == "date":
+            date = val.get("date")
+            text = date.get("start", "") if date else ""
+        if text:
+            result += f"  {key}: {text}\n"
+    return result
 
 def search_notion_full(query):
     try:
         full_content = ""
-        
-        # 1. 일반 페이지 검색
-        results = notion.search(
-            query=query,
-            page_size=20
-        ).get("results", [])
-        
+
+        # 1. 키워드로 검색
+        results = notion.search(query=query, page_size=20).get("results", [])
+
         for r in results:
             obj_type = r.get("object", "")
             parent_type = r.get("parent", {}).get("type", "")
-            
+
             if obj_type == "page" and parent_type == "database_id":
-                # 데이터베이스 항목
-                props = r.get("properties", {})
-                full_content += "\n=== 항목 ===\n"
-                for key, val in props.items():
-                    vtype = val.get("type", "")
-                    if vtype == "title":
-                        text = "".join([t.get("plain_text", "") for t in val.get("title", [])])
-                        if text: full_content += f"{key}: {text}\n"
-                    elif vtype == "rich_text":
-                        text = "".join([t.get("plain_text", "") for t in val.get("rich_text", [])])
-                        if text: full_content += f"{key}: {text}\n"
-                    elif vtype == "email":
-                        if val.get("email"): full_content += f"{key}: {val['email']}\n"
-                    elif vtype == "phone_number":
-                        if val.get("phone_number"): full_content += f"{key}: {val['phone_number']}\n"
-                    elif vtype == "number":
-                        if val.get("number"): full_content += f"{key}: {val['number']}\n"
-                    elif vtype == "select":
-                        sel = val.get("select")
-                        if sel: full_content += f"{key}: {sel.get('name', '')}\n"
-                    elif vtype == "url":
-                        if val.get("url"): full_content += f"{key}: {val['url']}\n"
-            
+                props_text = read_page_properties(r)
+                if props_text:
+                    full_content += f"\n--- 항목 ---\n{props_text}"
+
             elif obj_type == "page":
                 title = get_page_title(r)
                 content = get_notion_page_content(r["id"])
-                full_content += f"\n=== {title} ===\n{content}\n"
-            
+                if title or content:
+                    full_content += f"\n=== {title} ===\n{content}\n"
+
             elif obj_type == "database":
-                # 데이터베이스 발견 - 전체 항목 가져오기
                 db_id = r["id"]
-                db_title = r.get("title", [{}])[0].get("plain_text", "DB") if r.get("title") else "DB"
+                title_list = r.get("title", [])
+                db_title = title_list[0].get("plain_text", "DB") if title_list else "DB"
                 full_content += f"\n=== 데이터베이스: {db_title} ===\n"
                 try:
-                    db_results = notion.databases.query(database_id=db_id, page_size=50).get("results", [])
-                    for item in db_results:
-                        props = item.get("properties", {})
-                        for key, val in props.items():
-                            vtype = val.get("type", "")
-                            if vtype == "title":
-                                text = "".join([t.get("plain_text", "") for t in val.get("title", [])])
-                                if text: full_content += f"  {key}: {text}\n"
-                            elif vtype == "email":
-                                if val.get("email"): full_content += f"  {key}: {val['email']}\n"
-                            elif vtype == "phone_number":
-                                if val.get("phone_number"): full_content += f"  {key}: {val['phone_number']}\n"
-                        full_content += "\n"
-                except:
-                    pass
-        
-        # 2. 데이터베이스 직접 검색
-        db_results = notion.search(
-            query=query,
-            filter={"value": "database", "property": "object"},
-            page_size=10
-        ).get("results", [])
-        
-        for db in db_results:
-            db_id = db["id"]
-            db_title = db.get("title", [{}])[0].get("plain_text", "DB") if db.get("title") else "DB"
-            full_content += f"\n=== DB: {db_title} ===\n"
-            try:
-                items = notion.databases.query(database_id=db_id, page_size=100).get("results", [])
-                for item in items:
-                    props = item.get("properties", {})
-                    row = ""
-                    for key, val in props.items():
-                        vtype = val.get("type", "")
-                        if vtype == "title":
-                            text = "".join([t.get("plain_text", "") for t in val.get("title", [])])
-                            if text: row += f"{key}: {text} | "
-                        elif vtype == "email":
-                            if val.get("email"): row += f"{key}: {val['email']} | "
-                        elif vtype == "phone_number":
-                            if val.get("phone_number"): row += f"{key}: {val['phone_number']} | "
-                        elif vtype == "rich_text":
-                            text = "".join([t.get("plain_text", "") for t in val.get("rich_text", [])])
-                            if text: row += f"{key}: {text} | "
-                    if row:
-                        full_content += f"  {row}\n"
-            except:
-                pass
-        
+                    items = notion.databases.query(
+                        database_id=db_id,
+                        page_size=50
+                    ).get("results", [])
+                    for item in items:
+                        props_text = read_page_properties(item)
+                        if props_text:
+                            full_content += props_text + "\n"
+                except Exception as e:
+                    full_content += f"  DB 읽기 오류: {str(e)}\n"
+
         return full_content[:6000] if full_content else f"'{query}' 검색 결과가 없습니다."
     except Exception as ex:
-        return f"노션 검색 오류: {str(ex)}"
-        
+        return f"노션 오류: {str(ex)}"
+
 def create_notion_page(title, content):
     try:
-        pages = notion.search(
-            filter={"property": "object", "value": "page"}, page_size=1
-        ).get("results", [])
+        pages = notion.search(page_size=1).get("results", [])
         parent_id = pages[0]["id"] if pages else None
         if not parent_id:
-            return "노션 부모 페이지를 찾을 수 없습니다."
+            return "노션 페이지를 찾을 수 없습니다."
         notion.pages.create(
             parent={"page_id": parent_id},
             properties={"title": {"title": [{"text": {"content": title}}]}},
-            children=[{
-                "object": "block", "type": "paragraph",
-                "paragraph": {"rich_text": [{"text": {"content": content}}]}
-            }]
+            children=[{"object": "block", "type": "paragraph",
+                       "paragraph": {"rich_text": [{"text": {"content": content}}]}}]
         )
         return f"✅ 노션 페이지 '{title}' 생성 완료!"
     except Exception as ex:
-        return f"노션 페이지 생성 오류: {str(ex)}"
+        return f"노션 생성 오류: {str(ex)}"
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.chat_id
@@ -277,24 +232,20 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     creds = user_credentials.get(uid)
     extra_context = ""
 
-    # 구글 캘린더
     if creds and any(w in msg_lower for w in ["일정", "캘린더", "schedule", "calendar", "미팅", "약속"]):
-        extra_context += f"\n[Google Calendar - 앞으로 7일]\n{get_calendar_events(creds)}"
+        extra_context += f"\n[Google Calendar]\n{get_calendar_events(creds)}"
 
-    # Gmail
-    if creds and any(w in msg_lower for w in ["이메일", "메일", "gmail", "받은", "inbox", "읽지"]):
+    if creds and any(w in msg_lower for w in ["이메일", "메일", "gmail", "받은", "inbox"]):
         extra_context += f"\n[Gmail]\n{get_gmail_messages(creds)}"
 
-    # 노션 - 키워드 있으면 전체 내용 가져오기
     if any(w in msg_lower for w in ["노션", "notion"]):
-        search_query = msg_lower.replace("노션에서", "").replace("노션", "").replace("notion", "").strip()
-        search_query = search_query.replace("찾아줘", "").replace("이메일", "").replace("알려줘", "").strip()
+        search_query = msg_lower
+        for w in ["노션에서", "노션", "notion", "찾아줘", "알려줘", "보여줘"]:
+            search_query = search_query.replace(w, "").strip()
         if not search_query:
-            search_query = msg
-        notion_data = search_notion_full(search_query)
-        extra_context += f"\n[Notion 전체 검색 결과]\n{notion_data}"
+            search_query = ""
+        extra_context += f"\n[Notion]\n{search_notion_full(search_query)}"
 
-    # 드래프트 저장
     if creds and any(w in msg for w in ["드래프트", "draft", "임시저장"]):
         lines = msg.split("\n")
         to = subject = ""
@@ -309,12 +260,10 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif body_parts:
                 body_parts.append(line)
         if to and subject:
-            body = "\n".join(body_parts)
-            result = create_draft(creds, to, subject, body)
+            result = create_draft(creds, to, subject, "\n".join(body_parts))
             await update.message.reply_text(result)
             return
 
-    # 이메일 발송
     if creds and any(w in msg for w in ["이메일 보내", "메일 보내", "발송해"]):
         lines = msg.split("\n")
         to = subject = ""
@@ -329,12 +278,10 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif body_parts:
                 body_parts.append(line)
         if to and subject:
-            body = "\n".join(body_parts)
-            result = send_email(creds, to, subject, body)
+            result = send_email(creds, to, subject, "\n".join(body_parts))
             await update.message.reply_text(result)
             return
 
-    # 노션 페이지 생성
     if any(w in msg for w in ["노션에 만들어", "노션 페이지 만들어", "노션에 추가", "노션에 저장"]):
         lines = msg.split("\n")
         title = content = ""
@@ -343,18 +290,16 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 title = line.split(":", 1)[1].strip()
             elif "내용:" in line:
                 content = line.split(":", 1)[1].strip()
-        if not title:
-            title = lines[0].replace("노션에 만들어", "").replace("노션 페이지 만들어", "").strip()
         result = create_notion_page(title or "새 페이지", content or msg)
         await update.message.reply_text(result)
         return
 
     system_msg = """당신은 개인 비서입니다. 한국어로 대화하세요.
-절대로 JSON이나 function_calls 같은 코드를 출력하지 마세요.
-실시간 데이터를 바탕으로 직접 답변하세요.
+절대로 JSON, function_calls 같은 코드를 출력하지 마세요.
+제공된 실시간 데이터를 바탕으로 직접 답변하세요.
 
-이메일 드래프트/발송 요청시 형식 안내:
-받는사람: [이메일주소]
+이메일 드래프트/발송 요청시:
+받는사람: [이메일]
 제목: [제목]
 내용: [내용]"""
 
