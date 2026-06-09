@@ -83,6 +83,39 @@ def get_gmail_messages(creds):
     except Exception as ex:
         return f"Gmail 오류: {str(ex)}"
 
+def get_notion_data(query):
+    try:
+        results = notion.search(query=query, page_size=5).get("results", [])
+        if not results:
+            return "관련 노션 페이지가 없습니다."
+        result = ""
+        for r in results:
+            props = r.get("properties", {})
+            title_prop = props.get("title", props.get("Name", {}))
+            title_list = title_prop.get("title", [])
+            title_text = title_list[0].get("plain_text", "제목없음") if title_list else "제목없음"
+            result += f"- {title_text}\n"
+        return result
+    except Exception as ex:
+        return f"노션 오류: {str(ex)}"
+
+def create_notion_page(title, content):
+    try:
+        # 첫 번째 워크스페이스 페이지 찾기
+        pages = notion.search(filter={"property": "object", "value": "page"}, page_size=1).get("results", [])
+        parent_id = pages[0]["id"] if pages else None
+        if not parent_id:
+            return "노션 페이지를 찾을 수 없습니다."
+        new_page = notion.pages.create(
+            parent={"page_id": parent_id},
+            properties={"title": {"title": [{"text": {"content": title}}]}},
+            children=[{"object": "block", "type": "paragraph",
+                       "paragraph": {"rich_text": [{"text": {"content": content}}]}}]
+        )
+        return f"✅ 노션 페이지 생성 완료! '{title}'"
+    except Exception as ex:
+        return f"노션 페이지 생성 오류: {str(ex)}"
+
 def create_draft(creds, to, subject, body):
     try:
         gmail = build("gmail", "v1", credentials=creds)
@@ -93,7 +126,7 @@ def create_draft(creds, to, subject, body):
         draft = gmail.users().drafts().create(
             userId="me", body={"message": {"raw": raw}}
         ).execute()
-        return f"✅ 드래프트 저장 완료! ID: {draft['id']}"
+        return f"✅ 드래프트 저장 완료!"
     except Exception as ex:
         return f"드래프트 오류: {str(ex)}"
 
@@ -107,7 +140,7 @@ def send_email(creds, to, subject, body):
         gmail.users().messages().send(
             userId="me", body={"raw": raw}
         ).execute()
-        return f"✅ 이메일 발송 완료!"
+        return "✅ 이메일 발송 완료!"
     except Exception as ex:
         return f"이메일 오류: {str(ex)}"
 
@@ -120,7 +153,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     creds = user_credentials.get(uid)
 
-    # 드래프트 저장 요청 처리
+    # 드래프트 저장 요청
     if creds and any(w in msg for w in ["드래프트", "draft", "임시저장"]):
         lines = msg.split("\n")
         to = subject = body = ""
@@ -152,6 +185,15 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(result)
             return
 
+    # 노션 페이지 생성 요청
+    if any(w in msg for w in ["노션에 저장", "노션 페이지 만들어", "notion에 추가"]):
+        lines = msg.split("\n")
+        title = lines[0].replace("노션에 저장", "").replace("노션 페이지 만들어", "").strip()
+        content = "\n".join(lines[1:]) if len(lines) > 1 else msg
+        result = create_notion_page(title or "새 페이지", content)
+        await update.message.reply_text(result)
+        return
+
     extra_context = ""
     if creds:
         if any(w in msg_lower for w in ["일정", "캘린더", "schedule", "calendar", "미팅", "약속"]):
@@ -159,7 +201,10 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if any(w in msg_lower for w in ["이메일", "메일", "gmail", "받은", "inbox"]):
             extra_context += f"\n[Gmail 받은편지함]\n{get_gmail_messages(creds)}"
 
-    system_msg = "당신은 개인 비서입니다. 한국어로 대화하세요. 이메일 드래프트나 발송을 요청받으면 실제로 처리해드린다고 안내하고, 형식을 요청하세요: 받는사람:/제목:/내용:"
+    if any(w in msg_lower for w in ["노션", "notion", "페이지", "할일", "todo"]):
+        extra_context += f"\n[Notion]\n{get_notion_data(msg)}"
+
+    system_msg = "당신은 개인 비서입니다. 한국어로 대화하세요. 이메일 드래프트나 발송 요청시 형식을 안내하세요: 받는사람:/제목:/내용:"
     if extra_context:
         system_msg += f"\n\n실시간 데이터:{extra_context}"
 
