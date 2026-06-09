@@ -8,7 +8,6 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from notion_client import Client as NotionClient
 from datetime import datetime, timedelta
-import pytz
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
