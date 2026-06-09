@@ -1,8 +1,12 @@
 import os
 import json
 import base64
+import io
+import requests
 import anthropic
 import dropbox
+import PyPDF2
+import docx
 from email.mime.text import MIMEText
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
@@ -110,6 +114,83 @@ def send_email(creds, to, subject, body):
     except Exception as ex:
         return f"이메일 오류: {str(ex)}"
 
+def read_pdf_from_url(url):
+    try:
+        headers = {"Authorization": f"Bearer {NOTION_TOKEN}"}
+        response = requests.get(url, headers=headers, timeout=30)
+        pdf_file = io.BytesIO(response.content)
+        reader = PyPDF2.PdfReader(pdf_file)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+        return text[:4000] if text else "PDF 내용을 읽을 수 없습니다."
+    except Exception as ex:
+        return f"PDF 읽기 오류: {str(ex)}"
+
+def read_docx_from_url(url):
+    try:
+        headers = {"Authorization": f"Bearer {NOTION_TOKEN}"}
+        response = requests.get(url, headers=headers, timeout=30)
+        doc_file = io.BytesIO(response.content)
+        doc = docx.Document(doc_file)
+        text = "\n".join([para.text for para in doc.paragraphs if para.text])
+        return text[:4000] if text else "Word 파일 내용을 읽을 수 없습니다."
+    except Exception as ex:
+        return f"Word 읽기 오류: {str(ex)}"
+
+def get_notion_page_files(page_id):
+    """노션 페이지에서 첨부 파일 URL 가져오기"""
+    try:
+        blocks = notion.blocks.children.list(block_id=page_id, page_size=100).get("results", [])
+        files_content = ""
+        for block in blocks:
+            block_type = block.get("type", "")
+            
+            # 파일 블록
+            if block_type == "file":
+                file_data = block.get("file", {})
+                file_type = file_data.get("type", "")
+                if file_type == "external":
+                    url = file_data.get("external", {}).get("url", "")
+                else:
+                    url = file_data.get("file", {}).get("url", "")
+                name = block.get("file", {}).get("name", "파일")
+                if url:
+                    files_content += f"\n[파일: {name}]\n"
+                    if url.lower().endswith(".pdf"):
+                        files_content += read_pdf_from_url(url)
+                    elif url.lower().endswith((".docx", ".doc")):
+                        files_content += read_docx_from_url(url)
+                    else:
+                        files_content += f"파일 URL: {url}\n"
+            
+            # PDF 블록
+            elif block_type == "pdf":
+                pdf_data = block.get("pdf", {})
+                file_type = pdf_data.get("type", "")
+                if file_type == "external":
+                    url = pdf_data.get("external", {}).get("url", "")
+                else:
+                    url = pdf_data.get("file", {}).get("url", "")
+                if url:
+                    files_content += f"\n[PDF 파일]\n"
+                    files_content += read_pdf_from_url(url)
+            
+            # 이미지 블록 (URL만 제공)
+            elif block_type == "image":
+                img_data = block.get("image", {})
+                file_type = img_data.get("type", "")
+                if file_type == "external":
+                    url = img_data.get("external", {}).get("url", "")
+                else:
+                    url = img_data.get("file", {}).get("url", "")
+                if url:
+                    files_content += f"\n[이미지: {url}]\n"
+
+        return files_content if files_content else "첨부 파일이 없습니다."
+    except Exception as ex:
+        return f"파일 읽기 오류: {str(ex)}"
+
 def get_page_title(page):
     props = page.get("properties", {})
     for key in ["title", "Name", "제목", "이름"]:
@@ -199,7 +280,6 @@ def search_notion_full(query):
     except Exception as ex:
         return f"노션 오류: {str(ex)}"
 
-# ===== Dropbox 함수 =====
 def dropbox_list_files(path=""):
     try:
         result = dbx.files_list_folder(path if path else "")
@@ -217,14 +297,37 @@ def dropbox_read_file(path):
     try:
         metadata, response = dbx.files_download(path)
         content = response.content
-        # 텍스트 파일만 읽기
-        try:
-            text = content.decode("utf-8")
-            return text[:3000]
-        except:
-            return f"바이너리 파일입니다. 크기: {len(content):,} bytes"
+        if path.lower().endswith(".pdf"):
+            return read_pdf_from_url_bytes(content)
+        elif path.lower().endswith((".docx", ".doc")):
+            return read_docx_from_bytes(content)
+        else:
+            try:
+                return content.decode("utf-8")[:3000]
+            except:
+                return f"바이너리 파일입니다. 크기: {len(content):,} bytes"
     except Exception as ex:
         return f"파일 읽기 오류: {str(ex)}"
+
+def read_pdf_from_url_bytes(content):
+    try:
+        pdf_file = io.BytesIO(content)
+        reader = PyPDF2.PdfReader(pdf_file)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+        return text[:4000] if text else "PDF 내용을 읽을 수 없습니다."
+    except Exception as ex:
+        return f"PDF 읽기 오류: {str(ex)}"
+
+def read_docx_from_bytes(content):
+    try:
+        doc_file = io.BytesIO(content)
+        doc = docx.Document(doc_file)
+        text = "\n".join([para.text for para in doc.paragraphs if para.text])
+        return text[:4000] if text else "Word 파일 내용을 읽을 수 없습니다."
+    except Exception as ex:
+        return f"Word 읽기 오류: {str(ex)}"
 
 def dropbox_save_file(path, content):
     try:
@@ -284,26 +387,48 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if creds and any(w in msg_lower for w in ["이메일", "메일", "gmail", "받은", "inbox"]):
         extra_context += f"\n[Gmail]\n{get_gmail_messages(creds)}"
 
-    # 노션
-    draft_with_notion = any(w in msg_lower for w in ["드래프트", "draft"]) and any(w in msg_lower for w in ["노션", "notion", "찾아서"])
-    if any(w in msg_lower for w in ["노션", "notion"]) or draft_with_notion:
+    # 노션 파일 읽기
+    if any(w in msg_lower for w in ["노션", "notion"]) and any(w in msg_lower for w in ["파일", "pdf", "첨부", "문서", "word"]):
+        search_query = msg_lower
+        for w in ["노션에서", "노션", "notion", "파일", "pdf", "첨부", "문서", "읽어", "분석", "열어"]:
+            search_query = search_query.replace(w, "").strip()
+        results = notion.search(query=search_query, page_size=5).get("results", [])
+        for r in results:
+            if r.get("object") == "page":
+                title = get_page_title(r)
+                files = get_notion_page_files(r["id"])
+                if "첨부 파일이 없습니다." not in files:
+                    extra_context += f"\n[노션 페이지 '{title}' 첨부파일]\n{files}"
+
+    # 노션 일반 검색
+    elif any(w in msg_lower for w in ["노션", "notion"]) or (any(w in msg_lower for w in ["드래프트", "draft"]) and any(w in msg_lower for w in ["찾아서", "노션", "notion"])):
         search_query = msg_lower
         for w in ["노션에서", "노션", "notion", "찾아줘", "알려줘", "보여줘", "드래프트", "draft", "이메일", "만들어줘"]:
             search_query = search_query.replace(w, "").strip()
         notion_data = search_notion_full(search_query if search_query else msg)
         extra_context += f"\n[Notion 데이터]\n{notion_data}"
-        if creds and draft_with_notion:
+        if creds and any(w in msg_lower for w in ["드래프트", "draft"]):
             extra_context += f"\n[Google Calendar]\n{get_calendar_events(creds)}"
 
     # 드롭박스
     if any(w in msg_lower for w in ["드롭박스", "dropbox"]):
         if any(w in msg_lower for w in ["목록", "list", "파일 보여", "뭐 있어"]):
             extra_context += f"\n[Dropbox 파일 목록]\n{dropbox_list_files()}"
+        elif any(w in msg_lower for w in ["읽어", "열어", "분석"]):
+            search_q = msg_lower
+            for w in ["드롭박스", "dropbox", "읽어줘", "열어줘", "분석해줘"]:
+                search_q = search_q.replace(w, "").strip()
+            search_result = dropbox_search_files(search_q)
+            extra_context += f"\n[Dropbox 검색]\n{search_result}"
+            # 파일 경로가 있으면 내용 읽기
+            if "/" in search_result:
+                path = search_result.split("- ")[1].split("\n")[0].strip() if "- " in search_result else ""
+                if path:
+                    content = dropbox_read_file(path)
+                    extra_context += f"\n[파일 내용]\n{content}"
         elif any(w in msg_lower for w in ["찾아", "검색"]):
             search_q = msg_lower.replace("드롭박스", "").replace("dropbox", "").replace("찾아줘", "").replace("검색", "").strip()
             extra_context += f"\n[Dropbox 검색]\n{dropbox_search_files(search_q)}"
-        elif any(w in msg_lower for w in ["읽어", "내용", "열어"]):
-            extra_context += f"\n[Dropbox 파일 목록]\n{dropbox_list_files()}"
 
     # 직접 드래프트 형식
     if creds and any(w in msg for w in ["드래프트", "draft"]) and "받는사람:" in msg:
@@ -343,7 +468,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(result)
             return
 
-    # 드롭박스 파일 저장
+    # 드롭박스 저장
     if any(w in msg for w in ["드롭박스에 저장", "dropbox에 저장"]):
         lines = msg.split("\n")
         path = "/새파일.txt"
@@ -390,10 +515,7 @@ DRAFT_BODY_END
 DROPBOX_SAVE_PATH: [경로]
 DROPBOX_SAVE_CONTENT_START
 [내용]
-DROPBOX_SAVE_CONTENT_END
-
-## 드롭박스 파일 읽기
-특정 파일 내용을 읽을 때는 경로를 알려주세요."""
+DROPBOX_SAVE_CONTENT_END"""
 
     if extra_context:
         system_msg += f"\n\n=== 실시간 데이터 ===\n{extra_context}"
@@ -421,8 +543,6 @@ DROPBOX_SAVE_CONTENT_END
             await update.message.reply_text(draft_result)
         except:
             await update.message.reply_text(reply)
-
-    # 자동 드롭박스 저장
     elif "DROPBOX_SAVE_PATH:" in reply:
         try:
             path = reply.split("DROPBOX_SAVE_PATH:")[1].split("\n")[0].strip()
@@ -433,7 +553,6 @@ DROPBOX_SAVE_CONTENT_END
             await update.message.reply_text(save_result)
         except:
             await update.message.reply_text(reply)
-
     else:
         await update.message.reply_text(reply)
 
