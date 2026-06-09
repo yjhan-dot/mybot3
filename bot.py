@@ -1,6 +1,8 @@
 import os
 import json
+import base64
 import anthropic
+from email.mime.text import MIMEText
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 from google.oauth2.credentials import Credentials
@@ -30,7 +32,7 @@ async def start_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     flow.redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
     auth_url, _ = flow.authorization_url(prompt="consent")
     context.user_data["flow"] = flow
-    await update.message.reply_text(f"구글 인증 링크:\n{auth_url}\n\n인증 후 코드를 복사해서 /code 코드 형식으로 보내주세요!")
+    await update.message.reply_text(f"구글 인증 링크:\n{auth_url}\n\n인증 후 코드를 /code 코드 형식으로 보내주세요!")
 
 async def set_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -51,12 +53,8 @@ def get_calendar_events(creds):
         now = datetime.utcnow().isoformat() + "Z"
         tomorrow = (datetime.utcnow() + timedelta(days=2)).isoformat() + "Z"
         events = cal.events().list(
-            calendarId="primary",
-            timeMin=now,
-            timeMax=tomorrow,
-            maxResults=10,
-            singleEvents=True,
-            orderBy="startTime"
+            calendarId="primary", timeMin=now, timeMax=tomorrow,
+            maxResults=10, singleEvents=True, orderBy="startTime"
         ).execute().get("items", [])
         if not events:
             return "예정된 일정이 없습니다."
@@ -85,28 +83,87 @@ def get_gmail_messages(creds):
     except Exception as ex:
         return f"Gmail 오류: {str(ex)}"
 
+def create_draft(creds, to, subject, body):
+    try:
+        gmail = build("gmail", "v1", credentials=creds)
+        message = MIMEText(body)
+        message["to"] = to
+        message["subject"] = subject
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        draft = gmail.users().drafts().create(
+            userId="me", body={"message": {"raw": raw}}
+        ).execute()
+        return f"✅ 드래프트 저장 완료! ID: {draft['id']}"
+    except Exception as ex:
+        return f"드래프트 오류: {str(ex)}"
+
+def send_email(creds, to, subject, body):
+    try:
+        gmail = build("gmail", "v1", credentials=creds)
+        message = MIMEText(body)
+        message["to"] = to
+        message["subject"] = subject
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        gmail.users().messages().send(
+            userId="me", body={"raw": raw}
+        ).execute()
+        return f"✅ 이메일 발송 완료!"
+    except Exception as ex:
+        return f"이메일 오류: {str(ex)}"
+
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.chat_id
-    msg = update.message.text.lower()
+    msg = update.message.text
+    msg_lower = msg.lower()
     if uid not in history:
         history[uid] = []
 
     creds = user_credentials.get(uid)
+
+    # 드래프트 저장 요청 처리
+    if creds and any(w in msg for w in ["드래프트", "draft", "임시저장"]):
+        lines = msg.split("\n")
+        to = subject = body = ""
+        for line in lines:
+            if "받는사람:" in line or "to:" in line.lower():
+                to = line.split(":", 1)[1].strip()
+            elif "제목:" in line or "subject:" in line.lower():
+                subject = line.split(":", 1)[1].strip()
+            elif "내용:" in line or "body:" in line.lower():
+                body = line.split(":", 1)[1].strip()
+        if to and subject:
+            result = create_draft(creds, to, subject, body or msg)
+            await update.message.reply_text(result)
+            return
+
+    # 이메일 보내기 요청
+    if creds and any(w in msg for w in ["이메일 보내", "메일 보내", "send email"]):
+        lines = msg.split("\n")
+        to = subject = body = ""
+        for line in lines:
+            if "받는사람:" in line or "to:" in line.lower():
+                to = line.split(":", 1)[1].strip()
+            elif "제목:" in line or "subject:" in line.lower():
+                subject = line.split(":", 1)[1].strip()
+            elif "내용:" in line or "body:" in line.lower():
+                body = line.split(":", 1)[1].strip()
+        if to and subject:
+            result = send_email(creds, to, subject, body or msg)
+            await update.message.reply_text(result)
+            return
+
     extra_context = ""
-
     if creds:
-        if any(w in msg for w in ["일정", "캘린더", "schedule", "calendar", "미팅", "약속"]):
-            events = get_calendar_events(creds)
-            extra_context += f"\n[Google Calendar 일정]\n{events}"
-        if any(w in msg for w in ["이메일", "메일", "gmail", "받은", "inbox"]):
-            emails = get_gmail_messages(creds)
-            extra_context += f"\n[Gmail 받은편지함]\n{emails}"
+        if any(w in msg_lower for w in ["일정", "캘린더", "schedule", "calendar", "미팅", "약속"]):
+            extra_context += f"\n[Google Calendar]\n{get_calendar_events(creds)}"
+        if any(w in msg_lower for w in ["이메일", "메일", "gmail", "받은", "inbox"]):
+            extra_context += f"\n[Gmail 받은편지함]\n{get_gmail_messages(creds)}"
 
-    system_msg = "당신은 개인 비서입니다. 한국어로 대화하세요."
+    system_msg = "당신은 개인 비서입니다. 한국어로 대화하세요. 이메일 드래프트나 발송을 요청받으면 실제로 처리해드린다고 안내하고, 형식을 요청하세요: 받는사람:/제목:/내용:"
     if extra_context:
         system_msg += f"\n\n실시간 데이터:{extra_context}"
 
-    history[uid].append({"role": "user", "content": update.message.text})
+    history[uid].append({"role": "user", "content": msg})
     await context.bot.send_chat_action(chat_id=uid, action="typing")
 
     res = claude_client.messages.create(
