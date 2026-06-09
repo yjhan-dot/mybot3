@@ -147,64 +147,106 @@ def get_notion_page_content(page_id):
 
 def search_notion_full(query):
     try:
-        results = notion.search(query=query, page_size=10).get("results", [])
-        if not results:
-            return f"'{query}' 검색 결과가 없습니다."
-        
         full_content = ""
+        
+        # 1. 일반 페이지 검색
+        results = notion.search(
+            query=query,
+            page_size=20
+        ).get("results", [])
+        
         for r in results:
             obj_type = r.get("object", "")
+            parent_type = r.get("parent", {}).get("type", "")
             
-            if obj_type == "page":
-                # 데이터베이스 항목인지 확인
-                parent = r.get("parent", {})
-                if parent.get("type") == "database_id":
-                    # 데이터베이스 항목 - properties 읽기
-                    props = r.get("properties", {})
-                    full_content += f"\n=== 항목 ===\n"
-                    for key, val in props.items():
-                        val_type = val.get("type", "")
-                        if val_type == "title":
-                            text = "".join([t.get("plain_text", "") for t in val.get("title", [])])
-                            full_content += f"{key}: {text}\n"
-                        elif val_type == "rich_text":
-                            text = "".join([t.get("plain_text", "") for t in val.get("rich_text", [])])
-                            if text:
-                                full_content += f"{key}: {text}\n"
-                        elif val_type == "email":
-                            email = val.get("email", "")
-                            if email:
-                                full_content += f"{key}: {email}\n"
-                        elif val_type == "phone_number":
-                            phone = val.get("phone_number", "")
-                            if phone:
-                                full_content += f"{key}: {phone}\n"
-                        elif val_type == "number":
-                            num = val.get("number", "")
-                            if num:
-                                full_content += f"{key}: {num}\n"
-                        elif val_type == "select":
-                            sel = val.get("select", {})
-                            if sel:
-                                full_content += f"{key}: {sel.get('name', '')}\n"
-                        elif val_type == "multi_select":
-                            sels = [s.get("name", "") for s in val.get("multi_select", [])]
-                            if sels:
-                                full_content += f"{key}: {', '.join(sels)}\n"
-                        elif val_type == "url":
-                            url = val.get("url", "")
-                            if url:
-                                full_content += f"{key}: {url}\n"
-                else:
-                    # 일반 페이지
-                    title = get_page_title(r)
-                    page_id = r.get("id", "")
-                    content = get_notion_page_content(page_id)
-                    full_content += f"\n=== {title} ===\n{content}\n"
+            if obj_type == "page" and parent_type == "database_id":
+                # 데이터베이스 항목
+                props = r.get("properties", {})
+                full_content += "\n=== 항목 ===\n"
+                for key, val in props.items():
+                    vtype = val.get("type", "")
+                    if vtype == "title":
+                        text = "".join([t.get("plain_text", "") for t in val.get("title", [])])
+                        if text: full_content += f"{key}: {text}\n"
+                    elif vtype == "rich_text":
+                        text = "".join([t.get("plain_text", "") for t in val.get("rich_text", [])])
+                        if text: full_content += f"{key}: {text}\n"
+                    elif vtype == "email":
+                        if val.get("email"): full_content += f"{key}: {val['email']}\n"
+                    elif vtype == "phone_number":
+                        if val.get("phone_number"): full_content += f"{key}: {val['phone_number']}\n"
+                    elif vtype == "number":
+                        if val.get("number"): full_content += f"{key}: {val['number']}\n"
+                    elif vtype == "select":
+                        sel = val.get("select")
+                        if sel: full_content += f"{key}: {sel.get('name', '')}\n"
+                    elif vtype == "url":
+                        if val.get("url"): full_content += f"{key}: {val['url']}\n"
+            
+            elif obj_type == "page":
+                title = get_page_title(r)
+                content = get_notion_page_content(r["id"])
+                full_content += f"\n=== {title} ===\n{content}\n"
+            
+            elif obj_type == "database":
+                # 데이터베이스 발견 - 전체 항목 가져오기
+                db_id = r["id"]
+                db_title = r.get("title", [{}])[0].get("plain_text", "DB") if r.get("title") else "DB"
+                full_content += f"\n=== 데이터베이스: {db_title} ===\n"
+                try:
+                    db_results = notion.databases.query(database_id=db_id, page_size=50).get("results", [])
+                    for item in db_results:
+                        props = item.get("properties", {})
+                        for key, val in props.items():
+                            vtype = val.get("type", "")
+                            if vtype == "title":
+                                text = "".join([t.get("plain_text", "") for t in val.get("title", [])])
+                                if text: full_content += f"  {key}: {text}\n"
+                            elif vtype == "email":
+                                if val.get("email"): full_content += f"  {key}: {val['email']}\n"
+                            elif vtype == "phone_number":
+                                if val.get("phone_number"): full_content += f"  {key}: {val['phone_number']}\n"
+                        full_content += "\n"
+                except:
+                    pass
         
-        return full_content[:5000] if full_content else "검색 결과가 없습니다."
+        # 2. 데이터베이스 직접 검색
+        db_results = notion.search(
+            query=query,
+            filter={"value": "database", "property": "object"},
+            page_size=10
+        ).get("results", [])
+        
+        for db in db_results:
+            db_id = db["id"]
+            db_title = db.get("title", [{}])[0].get("plain_text", "DB") if db.get("title") else "DB"
+            full_content += f"\n=== DB: {db_title} ===\n"
+            try:
+                items = notion.databases.query(database_id=db_id, page_size=100).get("results", [])
+                for item in items:
+                    props = item.get("properties", {})
+                    row = ""
+                    for key, val in props.items():
+                        vtype = val.get("type", "")
+                        if vtype == "title":
+                            text = "".join([t.get("plain_text", "") for t in val.get("title", [])])
+                            if text: row += f"{key}: {text} | "
+                        elif vtype == "email":
+                            if val.get("email"): row += f"{key}: {val['email']} | "
+                        elif vtype == "phone_number":
+                            if val.get("phone_number"): row += f"{key}: {val['phone_number']} | "
+                        elif vtype == "rich_text":
+                            text = "".join([t.get("plain_text", "") for t in val.get("rich_text", [])])
+                            if text: row += f"{key}: {text} | "
+                    if row:
+                        full_content += f"  {row}\n"
+            except:
+                pass
+        
+        return full_content[:6000] if full_content else f"'{query}' 검색 결과가 없습니다."
     except Exception as ex:
         return f"노션 검색 오류: {str(ex)}"
+        
 def create_notion_page(title, content):
     try:
         pages = notion.search(
