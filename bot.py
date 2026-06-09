@@ -91,7 +91,7 @@ def create_draft(creds, to, subject, body):
         message["subject"] = subject
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         gmail.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
-        return "✅ 드래프트 저장 완료!"
+        return f"✅ 드래프트 저장 완료!\n받는사람: {to}\n제목: {subject}"
     except Exception as ex:
         return f"드래프트 오류: {str(ex)}"
 
@@ -166,8 +166,6 @@ def read_page_properties(page):
 def search_notion_full(query):
     try:
         full_content = ""
-
-        # 1. 키워드로 검색
         results = notion.search(query=query, page_size=20).get("results", [])
 
         for r in results:
@@ -232,21 +230,56 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     creds = user_credentials.get(uid)
     extra_context = ""
 
+    # 구글 캘린더
     if creds and any(w in msg_lower for w in ["일정", "캘린더", "schedule", "calendar", "미팅", "약속"]):
         extra_context += f"\n[Google Calendar]\n{get_calendar_events(creds)}"
 
+    # Gmail
     if creds and any(w in msg_lower for w in ["이메일", "메일", "gmail", "받은", "inbox"]):
         extra_context += f"\n[Gmail]\n{get_gmail_messages(creds)}"
 
-    if any(w in msg_lower for w in ["노션", "notion"]):
+    # 노션 검색 - 드래프트/이메일 관련 요청도 포함
+    notion_keywords = ["노션", "notion"]
+    draft_with_notion = creds and any(w in msg_lower for w in ["드래프트", "draft", "이메일 만들", "메일 만들", "이메일 작성", "메일 작성"]) and any(w in msg_lower for w in ["노션", "notion", "찾아서", "찾아", "정보"])
+    
+    if any(w in msg_lower for w in notion_keywords) or draft_with_notion:
+        # 검색어 추출
         search_query = msg_lower
-        for w in ["노션에서", "노션", "notion", "찾아줘", "알려줘", "보여줘"]:
+        for w in ["노션에서", "노션", "notion", "찾아줘", "알려줘", "보여줘", "드래프트", "draft", "이메일", "만들어줘", "작성해줘"]:
             search_query = search_query.replace(w, "").strip()
-        if not search_query:
-            search_query = ""
-        extra_context += f"\n[Notion]\n{search_notion_full(search_query)}"
+        notion_data = search_notion_full(search_query if search_query else msg)
+        extra_context += f"\n[Notion 데이터]\n{notion_data}"
 
-    if creds and any(w in msg for w in ["드래프트", "draft", "임시저장"]):
+    # 캘린더도 자동으로 가져오기 (드래프트 + 날짜 관련)
+    if creds and draft_with_notion:
+        extra_context += f"\n[Google Calendar - 앞으로 7일]\n{get_calendar_events(creds)}"
+
+    system_msg = """당신은 개인 비서입니다. 한국어로 대화하세요.
+절대로 JSON, function_calls 같은 코드를 출력하지 마세요.
+제공된 실시간 데이터를 바탕으로 직접 답변하세요.
+
+## 드래프트 자동 생성
+사용자가 "노션에서 찾아서 드래프트 만들어줘" 같은 요청을 하면:
+1. 제공된 Notion 데이터에서 이메일 주소와 관련 정보를 찾으세요
+2. 이메일 내용을 작성하세요
+3. 반드시 아래 형식으로 답변 끝에 추가하세요:
+
+DRAFT_TO: [이메일주소]
+DRAFT_SUBJECT: [제목]
+DRAFT_BODY_START
+[이메일 본문 내용]
+DRAFT_BODY_END
+
+이메일 드래프트/발송 직접 요청시 형식:
+받는사람: [이메일]
+제목: [제목]
+내용: [내용]"""
+
+    if extra_context:
+        system_msg += f"\n\n=== 실시간 데이터 ===\n{extra_context}"
+
+    # 직접 드래프트 형식 처리
+    if creds and any(w in msg for w in ["드래프트", "draft", "임시저장"]) and "받는사람:" in msg:
         lines = msg.split("\n")
         to = subject = ""
         body_parts = []
@@ -264,7 +297,8 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(result)
             return
 
-    if creds and any(w in msg for w in ["이메일 보내", "메일 보내", "발송해"]):
+    # 이메일 발송
+    if creds and any(w in msg for w in ["이메일 보내", "메일 보내", "발송해"]) and "받는사람:" in msg:
         lines = msg.split("\n")
         to = subject = ""
         body_parts = []
@@ -282,6 +316,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(result)
             return
 
+    # 노션 페이지 생성
     if any(w in msg for w in ["노션에 만들어", "노션 페이지 만들어", "노션에 추가", "노션에 저장"]):
         lines = msg.split("\n")
         title = content = ""
@@ -294,18 +329,6 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(result)
         return
 
-    system_msg = """당신은 개인 비서입니다. 한국어로 대화하세요.
-절대로 JSON, function_calls 같은 코드를 출력하지 마세요.
-제공된 실시간 데이터를 바탕으로 직접 답변하세요.
-
-이메일 드래프트/발송 요청시:
-받는사람: [이메일]
-제목: [제목]
-내용: [내용]"""
-
-    if extra_context:
-        system_msg += f"\n\n=== 실시간 데이터 ===\n{extra_context}"
-
     history[uid].append({"role": "user", "content": msg})
     await context.bot.send_chat_action(chat_id=uid, action="typing")
 
@@ -316,8 +339,27 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages=history[uid]
     )
     reply = res.content[0].text
+
+    # Claude가 DRAFT 형식으로 응답했으면 자동으로 드래프트 생성
+    if creds and "DRAFT_TO:" in reply:
+        try:
+            to = reply.split("DRAFT_TO:")[1].split("\n")[0].strip()
+            subject = reply.split("DRAFT_SUBJECT:")[1].split("\n")[0].strip()
+            body = reply.split("DRAFT_BODY_START")[1].split("DRAFT_BODY_END")[0].strip()
+            
+            # 드래프트 생성
+            draft_result = create_draft(creds, to, subject, body)
+            
+            # 사용자에게 보여줄 답변에서 DRAFT 형식 제거
+            clean_reply = reply.split("DRAFT_TO:")[0].strip()
+            await update.message.reply_text(clean_reply)
+            await update.message.reply_text(draft_result)
+        except:
+            await update.message.reply_text(reply)
+    else:
+        await update.message.reply_text(reply)
+
     history[uid].append({"role": "assistant", "content": reply})
-    await update.message.reply_text(reply)
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history[update.message.chat_id] = []
