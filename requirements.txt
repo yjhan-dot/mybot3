@@ -5,3 +5,6 @@ google-auth-oauthlib
 google-api-python-client
 notion-client
 dropbox
+PyPDF2
+python-docx
+requests
