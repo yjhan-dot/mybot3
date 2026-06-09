@@ -146,21 +146,32 @@ def get_notion_page_content(page_id):
         return f"내용 오류: {str(ex)}"
 
 def search_notion_full(query):
-    """노션 전체 검색 + 페이지 내용까지 가져오기"""
+    """노션 전체 페이지 내용까지 검색"""
     try:
-        results = notion.search(query=query, page_size=5).get("results", [])
-        if not results:
-            return f"'{query}' 검색 결과가 없습니다."
+        # 전체 페이지 가져오기
+        all_pages = notion.search(page_size=20).get("results", [])
         
-        full_content = ""
-        for r in results:
+        found_content = ""
+        for r in all_pages:
             title = get_page_title(r)
             page_id = r.get("id", "")
-            full_content += f"\n=== [{title}] ===\n"
             content = get_notion_page_content(page_id)
-            full_content += content + "\n"
+            
+            # 검색어가 제목이나 내용에 있으면 포함
+            if query.lower() in title.lower() or query.lower() in content.lower():
+                found_content += f"\n=== [{title}] ===\n{content}\n"
         
-        return full_content[:5000]
+        if not found_content:
+            # 검색어 없어도 전체 내용 반환
+            full = ""
+            for r in all_pages[:5]:
+                title = get_page_title(r)
+                page_id = r.get("id", "")
+                content = get_notion_page_content(page_id)
+                full += f"\n=== [{title}] ===\n{content}\n"
+            return full[:5000]
+        
+        return found_content[:5000]
     except Exception as ex:
         return f"노션 검색 오류: {str(ex)}"
 
