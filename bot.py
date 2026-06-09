@@ -146,35 +146,65 @@ def get_notion_page_content(page_id):
         return f"내용 오류: {str(ex)}"
 
 def search_notion_full(query):
-    """노션 전체 페이지 내용까지 검색"""
     try:
-        # 전체 페이지 가져오기
-        all_pages = notion.search(page_size=20).get("results", [])
+        results = notion.search(query=query, page_size=10).get("results", [])
+        if not results:
+            return f"'{query}' 검색 결과가 없습니다."
         
-        found_content = ""
-        for r in all_pages:
-            title = get_page_title(r)
-            page_id = r.get("id", "")
-            content = get_notion_page_content(page_id)
+        full_content = ""
+        for r in results:
+            obj_type = r.get("object", "")
             
-            # 검색어가 제목이나 내용에 있으면 포함
-            if query.lower() in title.lower() or query.lower() in content.lower():
-                found_content += f"\n=== [{title}] ===\n{content}\n"
+            if obj_type == "page":
+                # 데이터베이스 항목인지 확인
+                parent = r.get("parent", {})
+                if parent.get("type") == "database_id":
+                    # 데이터베이스 항목 - properties 읽기
+                    props = r.get("properties", {})
+                    full_content += f"\n=== 항목 ===\n"
+                    for key, val in props.items():
+                        val_type = val.get("type", "")
+                        if val_type == "title":
+                            text = "".join([t.get("plain_text", "") for t in val.get("title", [])])
+                            full_content += f"{key}: {text}\n"
+                        elif val_type == "rich_text":
+                            text = "".join([t.get("plain_text", "") for t in val.get("rich_text", [])])
+                            if text:
+                                full_content += f"{key}: {text}\n"
+                        elif val_type == "email":
+                            email = val.get("email", "")
+                            if email:
+                                full_content += f"{key}: {email}\n"
+                        elif val_type == "phone_number":
+                            phone = val.get("phone_number", "")
+                            if phone:
+                                full_content += f"{key}: {phone}\n"
+                        elif val_type == "number":
+                            num = val.get("number", "")
+                            if num:
+                                full_content += f"{key}: {num}\n"
+                        elif val_type == "select":
+                            sel = val.get("select", {})
+                            if sel:
+                                full_content += f"{key}: {sel.get('name', '')}\n"
+                        elif val_type == "multi_select":
+                            sels = [s.get("name", "") for s in val.get("multi_select", [])]
+                            if sels:
+                                full_content += f"{key}: {', '.join(sels)}\n"
+                        elif val_type == "url":
+                            url = val.get("url", "")
+                            if url:
+                                full_content += f"{key}: {url}\n"
+                else:
+                    # 일반 페이지
+                    title = get_page_title(r)
+                    page_id = r.get("id", "")
+                    content = get_notion_page_content(page_id)
+                    full_content += f"\n=== {title} ===\n{content}\n"
         
-        if not found_content:
-            # 검색어 없어도 전체 내용 반환
-            full = ""
-            for r in all_pages[:5]:
-                title = get_page_title(r)
-                page_id = r.get("id", "")
-                content = get_notion_page_content(page_id)
-                full += f"\n=== [{title}] ===\n{content}\n"
-            return full[:5000]
-        
-        return found_content[:5000]
+        return full_content[:5000] if full_content else "검색 결과가 없습니다."
     except Exception as ex:
         return f"노션 검색 오류: {str(ex)}"
-
 def create_notion_page(title, content):
     try:
         pages = notion.search(
