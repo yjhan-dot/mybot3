@@ -1,8 +1,8 @@
-import dropbox
 import os
 import json
 import base64
 import anthropic
+import dropbox
 from email.mime.text import MIMEText
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
@@ -15,6 +15,7 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 GOOGLE_CREDENTIALS = os.environ["GOOGLE_CREDENTIALS"]
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
+DROPBOX_TOKEN = os.environ["DROPBOX_TOKEN"]
 
 SCOPES = [
     "https://www.googleapis.com/auth/calendar",
@@ -23,6 +24,7 @@ SCOPES = [
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 notion = NotionClient(auth=NOTION_TOKEN)
+dbx = dropbox.Dropbox(DROPBOX_TOKEN)
 history = {}
 user_credentials = {}
 
@@ -168,42 +170,85 @@ def search_notion_full(query):
     try:
         full_content = ""
         results = notion.search(query=query, page_size=20).get("results", [])
-
         for r in results:
             obj_type = r.get("object", "")
             parent_type = r.get("parent", {}).get("type", "")
-
             if obj_type == "page" and parent_type == "database_id":
                 props_text = read_page_properties(r)
                 if props_text:
                     full_content += f"\n--- 항목 ---\n{props_text}"
-
             elif obj_type == "page":
                 title = get_page_title(r)
                 content = get_notion_page_content(r["id"])
                 if title or content:
                     full_content += f"\n=== {title} ===\n{content}\n"
-
             elif obj_type == "database":
                 db_id = r["id"]
                 title_list = r.get("title", [])
                 db_title = title_list[0].get("plain_text", "DB") if title_list else "DB"
                 full_content += f"\n=== 데이터베이스: {db_title} ===\n"
                 try:
-                    items = notion.databases.query(
-                        database_id=db_id,
-                        page_size=50
-                    ).get("results", [])
+                    items = notion.databases.query(database_id=db_id, page_size=50).get("results", [])
                     for item in items:
                         props_text = read_page_properties(item)
                         if props_text:
                             full_content += props_text + "\n"
                 except Exception as e:
                     full_content += f"  DB 읽기 오류: {str(e)}\n"
-
         return full_content[:6000] if full_content else f"'{query}' 검색 결과가 없습니다."
     except Exception as ex:
         return f"노션 오류: {str(ex)}"
+
+# ===== Dropbox 함수 =====
+def dropbox_list_files(path=""):
+    try:
+        result = dbx.files_list_folder(path if path else "")
+        files = []
+        for entry in result.entries:
+            if isinstance(entry, dropbox.files.FileMetadata):
+                files.append(f"📄 {entry.path_display} ({entry.size:,} bytes)")
+            elif isinstance(entry, dropbox.files.FolderMetadata):
+                files.append(f"📁 {entry.path_display}/")
+        return "\n".join(files) if files else "파일이 없습니다."
+    except Exception as ex:
+        return f"드롭박스 오류: {str(ex)}"
+
+def dropbox_read_file(path):
+    try:
+        metadata, response = dbx.files_download(path)
+        content = response.content
+        # 텍스트 파일만 읽기
+        try:
+            text = content.decode("utf-8")
+            return text[:3000]
+        except:
+            return f"바이너리 파일입니다. 크기: {len(content):,} bytes"
+    except Exception as ex:
+        return f"파일 읽기 오류: {str(ex)}"
+
+def dropbox_save_file(path, content):
+    try:
+        dbx.files_upload(
+            content.encode("utf-8"),
+            path,
+            mode=dropbox.files.WriteMode.overwrite
+        )
+        return f"✅ 드롭박스에 저장 완료! 경로: {path}"
+    except Exception as ex:
+        return f"파일 저장 오류: {str(ex)}"
+
+def dropbox_search_files(query):
+    try:
+        result = dbx.files_search_v2(query)
+        files = []
+        for match in result.matches[:10]:
+            metadata = match.metadata
+            if hasattr(metadata, 'metadata'):
+                entry = metadata.metadata
+                files.append(f"- {entry.path_display}")
+        return "\n".join(files) if files else f"'{query}' 파일을 찾을 수 없습니다."
+    except Exception as ex:
+        return f"드롭박스 검색 오류: {str(ex)}"
 
 def create_notion_page(title, content):
     try:
@@ -239,48 +284,29 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if creds and any(w in msg_lower for w in ["이메일", "메일", "gmail", "받은", "inbox"]):
         extra_context += f"\n[Gmail]\n{get_gmail_messages(creds)}"
 
-    # 노션 검색 - 드래프트/이메일 관련 요청도 포함
-    notion_keywords = ["노션", "notion"]
-    draft_with_notion = creds and any(w in msg_lower for w in ["드래프트", "draft", "이메일 만들", "메일 만들", "이메일 작성", "메일 작성"]) and any(w in msg_lower for w in ["노션", "notion", "찾아서", "찾아", "정보"])
-    
-    if any(w in msg_lower for w in notion_keywords) or draft_with_notion:
-        # 검색어 추출
+    # 노션
+    draft_with_notion = any(w in msg_lower for w in ["드래프트", "draft"]) and any(w in msg_lower for w in ["노션", "notion", "찾아서"])
+    if any(w in msg_lower for w in ["노션", "notion"]) or draft_with_notion:
         search_query = msg_lower
-        for w in ["노션에서", "노션", "notion", "찾아줘", "알려줘", "보여줘", "드래프트", "draft", "이메일", "만들어줘", "작성해줘"]:
+        for w in ["노션에서", "노션", "notion", "찾아줘", "알려줘", "보여줘", "드래프트", "draft", "이메일", "만들어줘"]:
             search_query = search_query.replace(w, "").strip()
         notion_data = search_notion_full(search_query if search_query else msg)
         extra_context += f"\n[Notion 데이터]\n{notion_data}"
+        if creds and draft_with_notion:
+            extra_context += f"\n[Google Calendar]\n{get_calendar_events(creds)}"
 
-    # 캘린더도 자동으로 가져오기 (드래프트 + 날짜 관련)
-    if creds and draft_with_notion:
-        extra_context += f"\n[Google Calendar - 앞으로 7일]\n{get_calendar_events(creds)}"
+    # 드롭박스
+    if any(w in msg_lower for w in ["드롭박스", "dropbox"]):
+        if any(w in msg_lower for w in ["목록", "list", "파일 보여", "뭐 있어"]):
+            extra_context += f"\n[Dropbox 파일 목록]\n{dropbox_list_files()}"
+        elif any(w in msg_lower for w in ["찾아", "검색"]):
+            search_q = msg_lower.replace("드롭박스", "").replace("dropbox", "").replace("찾아줘", "").replace("검색", "").strip()
+            extra_context += f"\n[Dropbox 검색]\n{dropbox_search_files(search_q)}"
+        elif any(w in msg_lower for w in ["읽어", "내용", "열어"]):
+            extra_context += f"\n[Dropbox 파일 목록]\n{dropbox_list_files()}"
 
-    system_msg = """당신은 개인 비서입니다. 한국어로 대화하세요.
-절대로 JSON, function_calls 같은 코드를 출력하지 마세요.
-제공된 실시간 데이터를 바탕으로 직접 답변하세요.
-
-## 드래프트 자동 생성
-사용자가 "노션에서 찾아서 드래프트 만들어줘" 같은 요청을 하면:
-1. 제공된 Notion 데이터에서 이메일 주소와 관련 정보를 찾으세요
-2. 이메일 내용을 작성하세요
-3. 반드시 아래 형식으로 답변 끝에 추가하세요:
-
-DRAFT_TO: [이메일주소]
-DRAFT_SUBJECT: [제목]
-DRAFT_BODY_START
-[이메일 본문 내용]
-DRAFT_BODY_END
-
-이메일 드래프트/발송 직접 요청시 형식:
-받는사람: [이메일]
-제목: [제목]
-내용: [내용]"""
-
-    if extra_context:
-        system_msg += f"\n\n=== 실시간 데이터 ===\n{extra_context}"
-
-    # 직접 드래프트 형식 처리
-    if creds and any(w in msg for w in ["드래프트", "draft", "임시저장"]) and "받는사람:" in msg:
+    # 직접 드래프트 형식
+    if creds and any(w in msg for w in ["드래프트", "draft"]) and "받는사람:" in msg:
         lines = msg.split("\n")
         to = subject = ""
         body_parts = []
@@ -317,6 +343,22 @@ DRAFT_BODY_END
             await update.message.reply_text(result)
             return
 
+    # 드롭박스 파일 저장
+    if any(w in msg for w in ["드롭박스에 저장", "dropbox에 저장"]):
+        lines = msg.split("\n")
+        path = "/새파일.txt"
+        content_parts = []
+        for line in lines:
+            if "경로:" in line:
+                path = line.split(":", 1)[1].strip()
+            elif "내용:" in line:
+                content_parts.append(line.split(":", 1)[1].strip())
+            elif content_parts:
+                content_parts.append(line)
+        result = dropbox_save_file(path, "\n".join(content_parts))
+        await update.message.reply_text(result)
+        return
+
     # 노션 페이지 생성
     if any(w in msg for w in ["노션에 만들어", "노션 페이지 만들어", "노션에 추가", "노션에 저장"]):
         lines = msg.split("\n")
@@ -330,6 +372,32 @@ DRAFT_BODY_END
         await update.message.reply_text(result)
         return
 
+    system_msg = """당신은 개인 비서입니다. 한국어로 대화하세요.
+절대로 JSON, function_calls 같은 코드를 출력하지 마세요.
+제공된 실시간 데이터를 바탕으로 직접 답변하세요.
+
+## 드래프트 자동 생성
+노션/드롭박스 데이터에서 정보를 찾아 드래프트를 만들 때 반드시 아래 형식으로 답변 끝에 추가:
+
+DRAFT_TO: [이메일주소]
+DRAFT_SUBJECT: [제목]
+DRAFT_BODY_START
+[이메일 본문]
+DRAFT_BODY_END
+
+## 드롭박스 파일 저장
+파일을 드롭박스에 저장할 때:
+DROPBOX_SAVE_PATH: [경로]
+DROPBOX_SAVE_CONTENT_START
+[내용]
+DROPBOX_SAVE_CONTENT_END
+
+## 드롭박스 파일 읽기
+특정 파일 내용을 읽을 때는 경로를 알려주세요."""
+
+    if extra_context:
+        system_msg += f"\n\n=== 실시간 데이터 ===\n{extra_context}"
+
     history[uid].append({"role": "user", "content": msg})
     await context.bot.send_chat_action(chat_id=uid, action="typing")
 
@@ -341,22 +409,31 @@ DRAFT_BODY_END
     )
     reply = res.content[0].text
 
-    # Claude가 DRAFT 형식으로 응답했으면 자동으로 드래프트 생성
+    # 자동 드래프트 생성
     if creds and "DRAFT_TO:" in reply:
         try:
             to = reply.split("DRAFT_TO:")[1].split("\n")[0].strip()
             subject = reply.split("DRAFT_SUBJECT:")[1].split("\n")[0].strip()
             body = reply.split("DRAFT_BODY_START")[1].split("DRAFT_BODY_END")[0].strip()
-            
-            # 드래프트 생성
             draft_result = create_draft(creds, to, subject, body)
-            
-            # 사용자에게 보여줄 답변에서 DRAFT 형식 제거
             clean_reply = reply.split("DRAFT_TO:")[0].strip()
             await update.message.reply_text(clean_reply)
             await update.message.reply_text(draft_result)
         except:
             await update.message.reply_text(reply)
+
+    # 자동 드롭박스 저장
+    elif "DROPBOX_SAVE_PATH:" in reply:
+        try:
+            path = reply.split("DROPBOX_SAVE_PATH:")[1].split("\n")[0].strip()
+            content = reply.split("DROPBOX_SAVE_CONTENT_START")[1].split("DROPBOX_SAVE_CONTENT_END")[0].strip()
+            save_result = dropbox_save_file(path, content)
+            clean_reply = reply.split("DROPBOX_SAVE_PATH:")[0].strip()
+            await update.message.reply_text(clean_reply)
+            await update.message.reply_text(save_result)
+        except:
+            await update.message.reply_text(reply)
+
     else:
         await update.message.reply_text(reply)
 
