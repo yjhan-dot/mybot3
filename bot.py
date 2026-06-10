@@ -32,6 +32,7 @@ dbx = dropbox.Dropbox(DROPBOX_TOKEN)
 history = {}
 user_credentials = {}
 
+# ===== GOOGLE AUTH =====
 async def start_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     creds_data = json.loads(GOOGLE_CREDENTIALS)
     flow = Flow.from_client_config(creds_data, scopes=SCOPES)
@@ -53,14 +54,15 @@ async def set_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_credentials[update.message.chat_id] = flow.credentials
     await update.message.reply_text("✅ 구글 인증 완료!")
 
+# ===== GOOGLE CALENDAR =====
 def get_calendar_events(creds):
     try:
         cal = build("calendar", "v3", credentials=creds)
         now = datetime.utcnow().isoformat() + "Z"
-        future = (datetime.utcnow() + timedelta(days=7)).isoformat() + "Z"
+        future = (datetime.utcnow() + timedelta(days=30)).isoformat() + "Z"
         events = cal.events().list(
             calendarId="primary", timeMin=now, timeMax=future,
-            maxResults=20, singleEvents=True, orderBy="startTime"
+            maxResults=30, singleEvents=True, orderBy="startTime"
         ).execute().get("items", [])
         if not events:
             return "예정된 일정이 없습니다."
@@ -72,23 +74,100 @@ def get_calendar_events(creds):
     except Exception as ex:
         return f"캘린더 오류: {str(ex)}"
 
-def get_gmail_messages(creds, query="is:unread"):
+# ===== GMAIL =====
+def get_email_body(msg):
+    """이메일 본문 추출"""
+    try:
+        payload = msg.get("payload", {})
+        parts = payload.get("parts", [])
+        
+        if not parts:
+            data = payload.get("body", {}).get("data", "")
+            if data:
+                return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")[:1000]
+        
+        for part in parts:
+            if part.get("mimeType") == "text/plain":
+                data = part.get("body", {}).get("data", "")
+                if data:
+                    return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")[:1000]
+            elif part.get("mimeType") == "text/html":
+                data = part.get("body", {}).get("data", "")
+                if data:
+                    text = base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+                    # HTML 태그 제거
+                    import re
+                    text = re.sub('<[^<]+?>', '', text)
+                    return text[:1000]
+        return ""
+    except:
+        return ""
+
+def search_gmail_full(creds, query):
+    """Gmail 전체 검색 - 제목, 내용, 발신자, 라벨 모두"""
     try:
         gmail = build("gmail", "v1", credentials=creds)
-        messages = gmail.users().messages().list(
-            userId="me", maxResults=10, q=query
-        ).execute().get("messages", [])
+        
+        # 다양한 검색 방식 시도
+        search_queries = [
+            query,  # 원본 쿼리
+            f"subject:{query}",  # 제목 검색
+            f"from:{query}",  # 발신자 검색
+            f"to:{query}",  # 수신자 검색
+        ]
+        
+        found_ids = set()
+        messages = []
+        
+        for sq in search_queries:
+            try:
+                results = gmail.users().messages().list(
+                    userId="me", maxResults=5, q=sq
+                ).execute().get("messages", [])
+                for m in results:
+                    if m["id"] not in found_ids:
+                        found_ids.add(m["id"])
+                        messages.append(m)
+            except:
+                pass
+        
         if not messages:
-            return "이메일이 없습니다."
+            return f"'{query}' 관련 이메일이 없습니다."
+        
         result = ""
-        for m in messages[:10]:
-            msg = gmail.users().messages().get(userId="me", id=m["id"], format="metadata").execute()
-            headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
-            snippet = msg.get("snippet", "")[:100]
-            result += f"- 제목: {headers.get('Subject', '없음')}\n  발신: {headers.get('From', '없음')}\n  미리보기: {snippet}\n\n"
-        return result
+        for m in messages[:15]:
+            try:
+                msg = gmail.users().messages().get(
+                    userId="me", id=m["id"], format="full"
+                ).execute()
+                headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
+                body = get_email_body(msg)
+                labels = msg.get("labelIds", [])
+                
+                result += f"{'='*30}\n"
+                result += f"제목: {headers.get('Subject', '없음')}\n"
+                result += f"발신: {headers.get('From', '없음')}\n"
+                result += f"수신: {headers.get('To', '없음')}\n"
+                result += f"날짜: {headers.get('Date', '없음')}\n"
+                result += f"라벨: {', '.join(labels)}\n"
+                if body:
+                    result += f"내용:\n{body}\n"
+                result += "\n"
+            except:
+                pass
+        
+        return result[:6000]
     except Exception as ex:
-        return f"Gmail 오류: {str(ex)}"
+        return f"Gmail 검색 오류: {str(ex)}"
+
+def get_gmail_labels(creds):
+    """Gmail 라벨 목록"""
+    try:
+        gmail = build("gmail", "v1", credentials=creds)
+        labels = gmail.users().labels().list(userId="me").execute().get("labels", [])
+        return [l["name"] for l in labels]
+    except:
+        return []
 
 def create_draft(creds, to, subject, body):
     try:
@@ -114,108 +193,7 @@ def send_email(creds, to, subject, body):
     except Exception as ex:
         return f"이메일 오류: {str(ex)}"
 
-def read_pdf_from_url(url):
-    try:
-        headers = {"Authorization": f"Bearer {NOTION_TOKEN}"}
-        response = requests.get(url, headers=headers, timeout=30)
-        pdf_file = io.BytesIO(response.content)
-        reader = PyPDF2.PdfReader(pdf_file)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
-        return text[:4000] if text else "PDF 내용을 읽을 수 없습니다."
-    except Exception as ex:
-        return f"PDF 읽기 오류: {str(ex)}"
-
-def read_docx_from_url(url):
-    try:
-        headers = {"Authorization": f"Bearer {NOTION_TOKEN}"}
-        response = requests.get(url, headers=headers, timeout=30)
-        doc_file = io.BytesIO(response.content)
-        doc = docx.Document(doc_file)
-        text = "\n".join([para.text for para in doc.paragraphs if para.text])
-        return text[:4000] if text else "Word 파일 내용을 읽을 수 없습니다."
-    except Exception as ex:
-        return f"Word 읽기 오류: {str(ex)}"
-
-def get_notion_page_files(page_id):
-    """노션 페이지에서 첨부 파일 URL 가져오기"""
-    try:
-        blocks = notion.blocks.children.list(block_id=page_id, page_size=100).get("results", [])
-        files_content = ""
-        for block in blocks:
-            block_type = block.get("type", "")
-            
-            # 파일 블록
-            if block_type == "file":
-                file_data = block.get("file", {})
-                file_type = file_data.get("type", "")
-                if file_type == "external":
-                    url = file_data.get("external", {}).get("url", "")
-                else:
-                    url = file_data.get("file", {}).get("url", "")
-                name = block.get("file", {}).get("name", "파일")
-                if url:
-                    files_content += f"\n[파일: {name}]\n"
-                    if url.lower().endswith(".pdf"):
-                        files_content += read_pdf_from_url(url)
-                    elif url.lower().endswith((".docx", ".doc")):
-                        files_content += read_docx_from_url(url)
-                    else:
-                        files_content += f"파일 URL: {url}\n"
-            
-            # PDF 블록
-            elif block_type == "pdf":
-                pdf_data = block.get("pdf", {})
-                file_type = pdf_data.get("type", "")
-                if file_type == "external":
-                    url = pdf_data.get("external", {}).get("url", "")
-                else:
-                    url = pdf_data.get("file", {}).get("url", "")
-                if url:
-                    files_content += f"\n[PDF 파일]\n"
-                    files_content += read_pdf_from_url(url)
-            
-            # 이미지 블록 (URL만 제공)
-            elif block_type == "image":
-                img_data = block.get("image", {})
-                file_type = img_data.get("type", "")
-                if file_type == "external":
-                    url = img_data.get("external", {}).get("url", "")
-                else:
-                    url = img_data.get("file", {}).get("url", "")
-                if url:
-                    files_content += f"\n[이미지: {url}]\n"
-
-        return files_content if files_content else "첨부 파일이 없습니다."
-    except Exception as ex:
-        return f"파일 읽기 오류: {str(ex)}"
-
-def get_page_title(page):
-    props = page.get("properties", {})
-    for key in ["title", "Name", "제목", "이름"]:
-        prop = props.get(key, {})
-        if isinstance(prop, dict):
-            title_list = prop.get("title", [])
-            if title_list:
-                return title_list[0].get("plain_text", "")
-    return "제목없음"
-
-def get_notion_page_content(page_id):
-    try:
-        blocks = notion.blocks.children.list(block_id=page_id, page_size=50).get("results", [])
-        content = ""
-        for block in blocks:
-            block_type = block.get("type", "")
-            block_data = block.get(block_type, {})
-            rich_text = block_data.get("rich_text", [])
-            text = "".join([t.get("plain_text", "") for t in rich_text])
-            if text:
-                content += f"{text}\n"
-        return content[:2000] if content else ""
-    except:
-        return ""
-
+# ===== NOTION =====
 def read_page_properties(page):
     props = page.get("properties", {})
     result = ""
@@ -243,53 +221,185 @@ def read_page_properties(page):
         elif vtype == "date":
             date = val.get("date")
             text = date.get("start", "") if date else ""
+        elif vtype == "checkbox":
+            text = str(val.get("checkbox", ""))
+        elif vtype == "files":
+            files = val.get("files", [])
+            urls = []
+            for f in files:
+                if f.get("type") == "external":
+                    urls.append(f.get("external", {}).get("url", ""))
+                else:
+                    urls.append(f.get("file", {}).get("url", ""))
+            text = ", ".join([u for u in urls if u])
         if text:
             result += f"  {key}: {text}\n"
     return result
 
-def search_notion_full(query):
+def read_pdf_bytes(content):
+    try:
+        pdf_file = io.BytesIO(content)
+        reader = PyPDF2.PdfReader(pdf_file)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+        return text[:3000] if text else ""
+    except:
+        return ""
+
+def read_docx_bytes(content):
+    try:
+        doc_file = io.BytesIO(content)
+        doc = docx.Document(doc_file)
+        text = "\n".join([p.text for p in doc.paragraphs if p.text])
+        return text[:3000] if text else ""
+    except:
+        return ""
+
+def read_file_from_url(url, filename=""):
+    """URL에서 파일 다운로드 후 읽기"""
+    try:
+        headers = {"Authorization": f"Bearer {NOTION_TOKEN}"}
+        response = requests.get(url, headers=headers, timeout=30)
+        content = response.content
+        
+        fname = filename.lower() if filename else url.lower()
+        if fname.endswith(".pdf") or "pdf" in fname:
+            return read_pdf_bytes(content)
+        elif fname.endswith((".docx", ".doc")) or "doc" in fname:
+            return read_docx_bytes(content)
+        else:
+            try:
+                return content.decode("utf-8")[:2000]
+            except:
+                return f"[바이너리 파일: {len(content)} bytes]"
+    except Exception as ex:
+        return f"파일 읽기 오류: {str(ex)}"
+
+def get_notion_page_content_full(page_id):
+    """노션 페이지 전체 내용 + 첨부 파일까지"""
+    try:
+        blocks = notion.blocks.children.list(block_id=page_id, page_size=100).get("results", [])
+        content = ""
+        file_contents = ""
+        
+        for block in blocks:
+            block_type = block.get("type", "")
+            block_data = block.get(block_type, {})
+            
+            # 텍스트 내용
+            rich_text = block_data.get("rich_text", [])
+            text = "".join([t.get("plain_text", "") for t in rich_text])
+            if text:
+                content += f"{text}\n"
+            
+            # 파일 첨부
+            if block_type in ["file", "pdf"]:
+                file_data = block_data
+                file_type = file_data.get("type", "")
+                if file_type == "external":
+                    url = file_data.get("external", {}).get("url", "")
+                else:
+                    url = file_data.get("file", {}).get("url", "")
+                name = file_data.get("name", "파일")
+                if url:
+                    file_content = read_file_from_url(url, name)
+                    if file_content:
+                        file_contents += f"\n[첨부파일: {name}]\n{file_content}\n"
+            
+            # 하위 블록
+            if block.get("has_children"):
+                try:
+                    sub_blocks = notion.blocks.children.list(block_id=block["id"]).get("results", [])
+                    for sub in sub_blocks:
+                        sub_type = sub.get("type", "")
+                        sub_data = sub.get(sub_type, {})
+                        sub_text = "".join([t.get("plain_text", "") for t in sub_data.get("rich_text", [])])
+                        if sub_text:
+                            content += f"  {sub_text}\n"
+                except:
+                    pass
+        
+        return (content + file_contents)[:4000]
+    except:
+        return ""
+
+def get_page_title(page):
+    props = page.get("properties", {})
+    for key in ["title", "Name", "제목", "이름"]:
+        prop = props.get(key, {})
+        if isinstance(prop, dict):
+            title_list = prop.get("title", [])
+            if title_list:
+                return title_list[0].get("plain_text", "")
+    return "제목없음"
+
+def scan_all_notion(query=""):
+    """노션 전체 스캔 - 모든 DB, 페이지, 첨부파일"""
     try:
         full_content = ""
-        results = notion.search(query=query, page_size=20).get("results", [])
-        for r in results:
-            obj_type = r.get("object", "")
-            parent_type = r.get("parent", {}).get("type", "")
-            if obj_type == "page" and parent_type == "database_id":
-                props_text = read_page_properties(r)
-                if props_text:
-                    full_content += f"\n--- 항목 ---\n{props_text}"
-            elif obj_type == "page":
-                title = get_page_title(r)
-                content = get_notion_page_content(r["id"])
-                if title or content:
-                    full_content += f"\n=== {title} ===\n{content}\n"
-            elif obj_type == "database":
-                db_id = r["id"]
-                title_list = r.get("title", [])
-                db_title = title_list[0].get("plain_text", "DB") if title_list else "DB"
-                full_content += f"\n=== 데이터베이스: {db_title} ===\n"
-                try:
-                    items = notion.databases.query(database_id=db_id, page_size=50).get("results", [])
-                    for item in items:
-                        props_text = read_page_properties(item)
-                        if props_text:
-                            full_content += props_text + "\n"
-                except Exception as e:
-                    full_content += f"  DB 읽기 오류: {str(e)}\n"
-        return full_content[:6000] if full_content else f"'{query}' 검색 결과가 없습니다."
-    except Exception as ex:
-        return f"노션 오류: {str(ex)}"
+        query_lower = query.lower()
+        query_words = [w for w in query_lower.split() if len(w) > 1] if query_lower else []
 
-def dropbox_list_files(path=""):
+        # 전체 검색
+        all_results = notion.search(page_size=100).get("results", [])
+        
+        # DB ID 수집
+        db_ids = set()
+        for r in all_results:
+            if r.get("object") == "database":
+                db_ids.add(r["id"])
+            elif r.get("object") == "page":
+                parent = r.get("parent", {})
+                if parent.get("type") == "database_id":
+                    db_ids.add(parent["database_id"])
+
+        # 모든 DB 항목 스캔
+        for db_id in db_ids:
+            try:
+                items = notion.databases.query(
+                    database_id=db_id,
+                    page_size=100
+                ).get("results", [])
+                
+                for item in items:
+                    props_text = read_page_properties(item)
+                    page_content = get_notion_page_content_full(item["id"])
+                    full_text = (props_text + page_content).lower()
+                    
+                    # 검색어 매칭
+                    if not query_words or any(w in full_text for w in query_words):
+                        full_content += f"\n{'='*20}\n"
+                        full_content += props_text
+                        if page_content:
+                            full_content += f"  [페이지 내용]\n{page_content[:1000]}\n"
+            except:
+                pass
+
+        # 일반 페이지 스캔
+        for r in all_results:
+            if r.get("object") == "page" and r.get("parent", {}).get("type") != "database_id":
+                title = get_page_title(r)
+                content = get_notion_page_content_full(r["id"])
+                full_text = (title + content).lower()
+                if not query_words or any(w in full_text for w in query_words):
+                    full_content += f"\n=== {title} ===\n{content[:1000]}\n"
+
+        return full_content[:8000] if full_content else f"'{query}' 관련 데이터 없음."
+    except Exception as ex:
+        return f"노션 스캔 오류: {str(ex)}"
+
+# ===== DROPBOX =====
+def dropbox_list_folder(path=""):
     try:
         result = dbx.files_list_folder(path if path else "")
         files = []
         for entry in result.entries:
             if isinstance(entry, dropbox.files.FileMetadata):
-                files.append(f"📄 {entry.path_display} ({entry.size:,} bytes)")
+                files.append(f"📄 {entry.path_display}")
             elif isinstance(entry, dropbox.files.FolderMetadata):
                 files.append(f"📁 {entry.path_display}/")
-        return "\n".join(files) if files else "파일이 없습니다."
+        return "\n".join(files) if files else "파일 없음"
     except Exception as ex:
         return f"드롭박스 오류: {str(ex)}"
 
@@ -298,36 +408,54 @@ def dropbox_read_file(path):
         metadata, response = dbx.files_download(path)
         content = response.content
         if path.lower().endswith(".pdf"):
-            return read_pdf_from_url_bytes(content)
+            return read_pdf_bytes(content)
         elif path.lower().endswith((".docx", ".doc")):
-            return read_docx_from_bytes(content)
+            return read_docx_bytes(content)
         else:
             try:
                 return content.decode("utf-8")[:3000]
             except:
-                return f"바이너리 파일입니다. 크기: {len(content):,} bytes"
+                return f"바이너리 파일: {len(content)} bytes"
     except Exception as ex:
         return f"파일 읽기 오류: {str(ex)}"
 
-def read_pdf_from_url_bytes(content):
+def dropbox_scan_folder(folder_path):
+    """드롭박스 폴더 전체 스캔 + 파일 내용 읽기"""
     try:
-        pdf_file = io.BytesIO(content)
-        reader = PyPDF2.PdfReader(pdf_file)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
-        return text[:4000] if text else "PDF 내용을 읽을 수 없습니다."
+        result = dbx.files_list_folder(folder_path, recursive=True)
+        all_content = ""
+        
+        for entry in result.entries:
+            if isinstance(entry, dropbox.files.FileMetadata):
+                path = entry.path_display
+                if path.lower().endswith((".pdf", ".docx", ".doc", ".txt")):
+                    file_content = dropbox_read_file(path)
+                    if file_content:
+                        all_content += f"\n{'='*20}\n[파일: {path}]\n{file_content[:2000]}\n"
+        
+        return all_content[:8000] if all_content else "읽을 수 있는 파일이 없습니다."
     except Exception as ex:
-        return f"PDF 읽기 오류: {str(ex)}"
+        return f"드롭박스 스캔 오류: {str(ex)}"
 
-def read_docx_from_bytes(content):
+def dropbox_search_and_read(query):
+    """드롭박스 검색 + 파일 내용 읽기"""
     try:
-        doc_file = io.BytesIO(content)
-        doc = docx.Document(doc_file)
-        text = "\n".join([para.text for para in doc.paragraphs if para.text])
-        return text[:4000] if text else "Word 파일 내용을 읽을 수 없습니다."
+        result = dbx.files_search_v2(query)
+        content = ""
+        
+        for match in result.matches[:10]:
+            metadata = match.metadata
+            if hasattr(metadata, 'metadata'):
+                entry = metadata.metadata
+                path = entry.path_display
+                content += f"\n[파일: {path}]\n"
+                file_content = dropbox_read_file(path)
+                if file_content:
+                    content += file_content[:2000] + "\n"
+        
+        return content[:6000] if content else f"'{query}' 파일 없음."
     except Exception as ex:
-        return f"Word 읽기 오류: {str(ex)}"
+        return f"드롭박스 검색 오류: {str(ex)}"
 
 def dropbox_save_file(path, content):
     try:
@@ -336,22 +464,9 @@ def dropbox_save_file(path, content):
             path,
             mode=dropbox.files.WriteMode.overwrite
         )
-        return f"✅ 드롭박스에 저장 완료! 경로: {path}"
+        return f"✅ 드롭박스 저장 완료! 경로: {path}"
     except Exception as ex:
-        return f"파일 저장 오류: {str(ex)}"
-
-def dropbox_search_files(query):
-    try:
-        result = dbx.files_search_v2(query)
-        files = []
-        for match in result.matches[:10]:
-            metadata = match.metadata
-            if hasattr(metadata, 'metadata'):
-                entry = metadata.metadata
-                files.append(f"- {entry.path_display}")
-        return "\n".join(files) if files else f"'{query}' 파일을 찾을 수 없습니다."
-    except Exception as ex:
-        return f"드롭박스 검색 오류: {str(ex)}"
+        return f"저장 오류: {str(ex)}"
 
 def create_notion_page(title, content):
     try:
@@ -369,6 +484,7 @@ def create_notion_page(title, content):
     except Exception as ex:
         return f"노션 생성 오류: {str(ex)}"
 
+# ===== MAIN CHAT =====
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.chat_id
     msg = update.message.text
@@ -383,55 +499,46 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if creds and any(w in msg_lower for w in ["일정", "캘린더", "schedule", "calendar", "미팅", "약속"]):
         extra_context += f"\n[Google Calendar]\n{get_calendar_events(creds)}"
 
-    # Gmail
-    if creds and any(w in msg_lower for w in ["이메일", "메일", "gmail", "받은", "inbox"]):
-        extra_context += f"\n[Gmail]\n{get_gmail_messages(creds)}"
+    # Gmail - 항상 전체 검색
+    if creds and any(w in msg_lower for w in ["이메일", "메일", "gmail", "email", "mail"]):
+        search_q = msg_lower
+        for w in ["이메일", "메일", "gmail", "email", "mail", "찾아줘", "검색", "알려줘",
+                  "받은", "보내줘", "드래프트", "draft", "에서", "에게", "한테"]:
+            search_q = search_q.replace(w, "").strip()
+        extra_context += f"\n[Gmail 검색: '{search_q}']\n{search_gmail_full(creds, search_q if search_q else 'is:inbox')}"
 
-    # 노션 파일 읽기
-    if any(w in msg_lower for w in ["노션", "notion"]) and any(w in msg_lower for w in ["파일", "pdf", "첨부", "문서", "word"]):
-        search_query = msg_lower
-        for w in ["노션에서", "노션", "notion", "파일", "pdf", "첨부", "문서", "읽어", "분석", "열어"]:
-            search_query = search_query.replace(w, "").strip()
-        results = notion.search(query=search_query, page_size=5).get("results", [])
-        for r in results:
-            if r.get("object") == "page":
-                title = get_page_title(r)
-                files = get_notion_page_files(r["id"])
-                if "첨부 파일이 없습니다." not in files:
-                    extra_context += f"\n[노션 페이지 '{title}' 첨부파일]\n{files}"
-
-    # 노션 일반 검색
-    elif any(w in msg_lower for w in ["노션", "notion"]) or (any(w in msg_lower for w in ["드래프트", "draft"]) and any(w in msg_lower for w in ["찾아서", "노션", "notion"])):
-        search_query = msg_lower
-        for w in ["노션에서", "노션", "notion", "찾아줘", "알려줘", "보여줘", "드래프트", "draft", "이메일", "만들어줘"]:
-            search_query = search_query.replace(w, "").strip()
-        notion_data = search_notion_full(search_query if search_query else msg)
-        extra_context += f"\n[Notion 데이터]\n{notion_data}"
-        if creds and any(w in msg_lower for w in ["드래프트", "draft"]):
+    # 노션 - 주소/이름/트랜젝션 등 포함시 항상 전체 스캔
+    notion_trigger = any(w in msg_lower for w in [
+        "노션", "notion", "찾아줘", "찾아서", "트랜젝션", "transaction",
+        "주소", "address", "고객", "클로징", "closing", "계약", "파일",
+        "정보", "이름", "전화", "이메일 주소"
+    ])
+    if notion_trigger:
+        search_q = msg_lower
+        for w in ["노션에서", "노션", "notion", "찾아줘", "찾아서", "알려줘",
+                  "드래프트", "만들어줘", "영어로", "한국어로", "작성해줘", "이메일"]:
+            search_q = search_q.replace(w, "").strip()
+        notion_data = scan_all_notion(search_q)
+        extra_context += f"\n[Notion 전체 데이터]\n{notion_data}"
+        if creds:
             extra_context += f"\n[Google Calendar]\n{get_calendar_events(creds)}"
 
-    # 드롭박스
-    if any(w in msg_lower for w in ["드롭박스", "dropbox"]):
-        if any(w in msg_lower for w in ["목록", "list", "파일 보여", "뭐 있어"]):
-            extra_context += f"\n[Dropbox 파일 목록]\n{dropbox_list_files()}"
-        elif any(w in msg_lower for w in ["읽어", "열어", "분석"]):
-            search_q = msg_lower
-            for w in ["드롭박스", "dropbox", "읽어줘", "열어줘", "분석해줘"]:
-                search_q = search_q.replace(w, "").strip()
-            search_result = dropbox_search_files(search_q)
-            extra_context += f"\n[Dropbox 검색]\n{search_result}"
-            # 파일 경로가 있으면 내용 읽기
-            if "/" in search_result:
-                path = search_result.split("- ")[1].split("\n")[0].strip() if "- " in search_result else ""
-                if path:
-                    content = dropbox_read_file(path)
-                    extra_context += f"\n[파일 내용]\n{content}"
-        elif any(w in msg_lower for w in ["찾아", "검색"]):
-            search_q = msg_lower.replace("드롭박스", "").replace("dropbox", "").replace("찾아줘", "").replace("검색", "").strip()
-            extra_context += f"\n[Dropbox 검색]\n{dropbox_search_files(search_q)}"
+    # 드롭박스 - Binding 폴더 자동 포함
+    if any(w in msg_lower for w in ["드롭박스", "dropbox", "binding", "바인딩", "서류", "계약서"]):
+        # Binding 폴더 스캔
+        binding_content = dropbox_scan_folder("/Binding")
+        extra_context += f"\n[Dropbox Binding 폴더]\n{binding_content}"
+        
+        # 추가 검색
+        search_q = msg_lower
+        for w in ["드롭박스", "dropbox", "binding", "바인딩", "서류", "찾아줘", "읽어줘"]:
+            search_q = search_q.replace(w, "").strip()
+        if search_q:
+            search_result = dropbox_search_and_read(search_q)
+            extra_context += f"\n[Dropbox 검색: '{search_q}']\n{search_result}"
 
-    # 직접 드래프트 형식
-    if creds and any(w in msg for w in ["드래프트", "draft"]) and "받는사람:" in msg:
+    # 직접 드래프트
+    if creds and "받는사람:" in msg:
         lines = msg.split("\n")
         to = subject = ""
         body_parts = []
@@ -497,28 +604,27 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(result)
         return
 
-    system_msg = """당신은 개인 비서입니다. 한국어로 대화하세요.
-절대로 JSON, function_calls 같은 코드를 출력하지 마세요.
-제공된 실시간 데이터를 바탕으로 직접 답변하세요.
+    system_msg = """You are a personal real estate assistant. Respond in the same language the user uses.
+NEVER output JSON, function_calls, or code in your response.
+Use the provided real-time data to answer directly and take action.
 
-## 드래프트 자동 생성
-노션/드롭박스 데이터에서 정보를 찾아 드래프트를 만들 때 반드시 아래 형식으로 답변 끝에 추가:
+## Auto Draft Creation
+When user asks to find info and create a draft, use provided data and output at the END:
 
-DRAFT_TO: [이메일주소]
-DRAFT_SUBJECT: [제목]
+DRAFT_TO: [email]
+DRAFT_SUBJECT: [subject]
 DRAFT_BODY_START
-[이메일 본문]
+[email body]
 DRAFT_BODY_END
 
-## 드롭박스 파일 저장
-파일을 드롭박스에 저장할 때:
-DROPBOX_SAVE_PATH: [경로]
+## Dropbox File Save
+DROPBOX_SAVE_PATH: [path]
 DROPBOX_SAVE_CONTENT_START
-[내용]
+[content]
 DROPBOX_SAVE_CONTENT_END"""
 
     if extra_context:
-        system_msg += f"\n\n=== 실시간 데이터 ===\n{extra_context}"
+        system_msg += f"\n\n=== Real-time Data ===\n{extra_context}"
 
     history[uid].append({"role": "user", "content": msg})
     await context.bot.send_chat_action(chat_id=uid, action="typing")
@@ -531,7 +637,6 @@ DROPBOX_SAVE_CONTENT_END"""
     )
     reply = res.content[0].text
 
-    # 자동 드래프트 생성
     if creds and "DRAFT_TO:" in reply:
         try:
             to = reply.split("DRAFT_TO:")[1].split("\n")[0].strip()
