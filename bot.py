@@ -232,6 +232,25 @@ def read_page_properties(page):
                 else:
                     urls.append(f.get("file", {}).get("url", ""))
             text = ", ".join([u for u in urls if u])
+        elif vtype == "formula":
+            formula = val.get("formula", {})
+            ftype = formula.get("type", "")
+            if ftype == "string":
+                text = formula.get("string", "") or ""
+            elif ftype == "number":
+                num = formula.get("number")
+                text = str(num) if num is not None else ""
+        elif vtype == "relation":
+            pass
+        elif vtype == "rollup":
+            pass
+        
+        # rich_text 타입에 이메일처럼 보이는 값 체크
+        if not text and vtype == "rich_text":
+            raw = "".join([t.get("plain_text", "") for t in val.get("rich_text", [])])
+            if raw:
+                text = raw
+
         if text:
             result += f"  {key}: {text}\n"
     return result
