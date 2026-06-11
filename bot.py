@@ -200,61 +200,102 @@ def read_page_properties(page):
     for key, val in props.items():
         vtype = val.get("type", "")
         text = ""
-        if vtype == "title":
-            text = "".join([t.get("plain_text", "") for t in val.get("title", [])])
-        elif vtype == "rich_text":
-            text = "".join([t.get("plain_text", "") for t in val.get("rich_text", [])])
-        elif vtype == "email":
-            text = val.get("email", "") or ""
-        elif vtype == "phone_number":
-            text = val.get("phone_number", "") or ""
-        elif vtype == "number":
-            num = val.get("number")
-            text = str(num) if num is not None else ""
-        elif vtype == "select":
-            sel = val.get("select")
-            text = sel.get("name", "") if sel else ""
-        elif vtype == "multi_select":
-            text = ", ".join([s.get("name", "") for s in val.get("multi_select", [])])
-        elif vtype == "url":
-            text = val.get("url", "") or ""
-        elif vtype == "date":
-            date = val.get("date")
-            text = date.get("start", "") if date else ""
-        elif vtype == "checkbox":
-            text = str(val.get("checkbox", ""))
-        elif vtype == "files":
-            files = val.get("files", [])
-            urls = []
-            for f in files:
-                if f.get("type") == "external":
-                    urls.append(f.get("external", {}).get("url", ""))
-                else:
-                    urls.append(f.get("file", {}).get("url", ""))
-            text = ", ".join([u for u in urls if u])
-        elif vtype == "formula":
-            formula = val.get("formula", {})
-            ftype = formula.get("type", "")
-            if ftype == "string":
-                text = formula.get("string", "") or ""
-            elif ftype == "number":
-                num = formula.get("number")
-                text = str(num) if num is not None else ""
-        elif vtype == "relation":
-            pass
-        elif vtype == "rollup":
-            pass
         
-        # rich_text 타입에 이메일처럼 보이는 값 체크
-        if not text and vtype == "rich_text":
-            raw = "".join([t.get("plain_text", "") for t in val.get("rich_text", [])])
-            if raw:
-                text = raw
-
-        if text:
+        try:
+            if vtype == "title":
+                text = "".join([t.get("plain_text", "") for t in val.get("title", [])])
+            elif vtype == "rich_text":
+                text = "".join([t.get("plain_text", "") for t in val.get("rich_text", [])])
+            elif vtype == "email":
+                text = str(val.get("email", "") or "")
+            elif vtype == "phone_number":
+                text = str(val.get("phone_number", "") or "")
+            elif vtype == "number":
+                num = val.get("number")
+                text = str(num) if num is not None else ""
+            elif vtype == "select":
+                sel = val.get("select")
+                text = sel.get("name", "") if sel else ""
+            elif vtype == "multi_select":
+                text = ", ".join([s.get("name", "") for s in val.get("multi_select", [])])
+            elif vtype == "url":
+                text = str(val.get("url", "") or "")
+            elif vtype == "date":
+                date = val.get("date")
+                text = date.get("start", "") if date else ""
+            elif vtype == "checkbox":
+                text = str(val.get("checkbox", ""))
+            elif vtype == "files":
+                files = val.get("files", [])
+                names = []
+                for f in files:
+                    name = f.get("name", "")
+                    if f.get("type") == "external":
+                        url = f.get("external", {}).get("url", "")
+                    else:
+                        url = f.get("file", {}).get("url", "")
+                    names.append(f"{name}({url})" if url else name)
+                text = ", ".join(names)
+            elif vtype == "formula":
+                formula = val.get("formula", {})
+                ftype = formula.get("type", "")
+                if ftype == "string":
+                    text = str(formula.get("string", "") or "")
+                elif ftype == "number":
+                    num = formula.get("number")
+                    text = str(num) if num is not None else ""
+                elif ftype == "boolean":
+                    text = str(formula.get("boolean", ""))
+                elif ftype == "date":
+                    d = formula.get("date", {})
+                    text = d.get("start", "") if d else ""
+            elif vtype == "relation":
+                relations = val.get("relation", [])
+                text = ", ".join([r.get("id", "") for r in relations[:3]])
+            elif vtype == "rollup":
+                rollup = val.get("rollup", {})
+                rtype = rollup.get("type", "")
+                if rtype == "number":
+                    num = rollup.get("number")
+                    text = str(num) if num is not None else ""
+                elif rtype == "array":
+                    items = rollup.get("array", [])
+                    texts = []
+                    for item in items:
+                        itype = item.get("type", "")
+                        if itype == "rich_text":
+                            t = "".join([x.get("plain_text", "") for x in item.get("rich_text", [])])
+                            if t: texts.append(t)
+                        elif itype == "title":
+                            t = "".join([x.get("plain_text", "") for x in item.get("title", [])])
+                            if t: texts.append(t)
+                    text = ", ".join(texts)
+            elif vtype == "people":
+                people = val.get("people", [])
+                text = ", ".join([p.get("name", "") for p in people])
+            elif vtype == "created_time":
+                text = str(val.get("created_time", ""))
+            elif vtype == "last_edited_time":
+                text = str(val.get("last_edited_time", ""))
+            elif vtype == "created_by":
+                text = val.get("created_by", {}).get("name", "")
+            elif vtype == "last_edited_by":
+                text = val.get("last_edited_by", {}).get("name", "")
+            elif vtype == "status":
+                status = val.get("status")
+                text = status.get("name", "") if status else ""
+            else:
+                # 알 수 없는 타입 - 원본 값 그대로 출력
+                raw = str(val)
+                if len(raw) < 200:
+                    text = raw
+        except Exception as e:
+            text = f"[읽기 오류: {str(e)}]"
+        
+        if text and text not in ["None", "False", "[]", "{}"]:
             result += f"  {key}: {text}\n"
+    
     return result
-
 def read_pdf_bytes(content):
     try:
         pdf_file = io.BytesIO(content)
